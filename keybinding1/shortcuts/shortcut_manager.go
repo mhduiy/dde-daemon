@@ -14,10 +14,11 @@ import (
 	"unicode"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/linuxdeepin/dde-daemon/keybinding1/constants"
 	"github.com/linuxdeepin/dde-daemon/keybinding1/util"
+	configManager "github.com/linuxdeepin/go-dbus-factory/org.desktopspec.ConfigManager"
 	wm "github.com/linuxdeepin/go-dbus-factory/session/com.deepin.wm"
 	daemon "github.com/linuxdeepin/go-dbus-factory/system/org.deepin.dde.daemon1"
-	gio "github.com/linuxdeepin/go-gir/gio-2.0"
 	"github.com/linuxdeepin/go-lib/gettext"
 	"github.com/linuxdeepin/go-lib/keyfile"
 	"github.com/linuxdeepin/go-lib/log"
@@ -134,12 +135,39 @@ type ShortcutManager struct {
 	EliminateConflictDone bool
 
 	WaylandCustomShortCutMap map[string]string
+
+	shortcutSystemConfigMgr      configManager.Manager
+	shortcutMediaConfigMgr       configManager.Manager
+	shortcutWrapGnomeWmConfigMgr configManager.Manager
+	shortcutEnableConfigMgr      configManager.Manager
+	shortcutPlatformMgr          configManager.Manager
 }
 
 type KeyEvent struct {
 	Mods     Modifiers
 	Code     Keycode
 	Shortcut Shortcut
+}
+
+// 将dconfig返回的值安全地转换为[]string
+func convertToStringSlice(value interface{}) ([]string, error) {
+	if strSlice, ok := value.([]string); ok {
+		return strSlice, nil
+	}
+
+	if variantSlice, ok := value.([]dbus.Variant); ok {
+		result := make([]string, len(variantSlice))
+		for i, variant := range variantSlice {
+			if str, ok := variant.Value().(string); ok {
+				result[i] = str
+			} else {
+				return nil, fmt.Errorf("variant at index %d is not a string: %T", i, variant.Value())
+			}
+		}
+		return result, nil
+	}
+
+	return nil, fmt.Errorf("unsupported type for string slice conversion: %T", value)
 }
 
 func NewShortcutManager(conn *x.Conn, keySymbols *keysyms.KeySymbols, eventCb KeyEventFunc) *ShortcutManager {
@@ -155,6 +183,8 @@ func NewShortcutManager(conn *x.Conn, keySymbols *keysyms.KeySymbols, eventCb Ke
 		pinyinEnabled:            isZH(),
 		WaylandCustomShortCutMap: make(map[string]string),
 	}
+
+	ss.initDconfig()
 
 	ss.xRecordEventHandler = NewXRecordEventHandler(keySymbols)
 	ss.xRecordEventHandler.modKeyReleasedCb = func(code uint8, mods uint16) {
@@ -201,6 +231,128 @@ func NewShortcutManager(conn *x.Conn, keySymbols *keysyms.KeySymbols, eventCb Ke
 	}
 
 	return ss
+}
+
+func (sm *ShortcutManager) initDconfig() {
+	bus, err := dbus.SystemBus()
+	if err != nil {
+		logger.Warning("init D-BUS failed: ", err)
+		return
+	}
+	ds := configManager.NewConfigManager(bus)
+
+	keybindingMediaConfigPath, err := ds.AcquireManager(0, constants.DSettingsAppID, constants.DSettingsKeybindingMediaKeyId, "")
+	if err != nil || keybindingMediaConfigPath == "" {
+		logger.Warning(err)
+		return
+	}
+
+	sm.shortcutMediaConfigMgr, err = configManager.NewManager(bus, keybindingMediaConfigPath)
+	if err != nil {
+		logger.Warning(err)
+	}
+
+	keybindingSystemConfigPath, err := ds.AcquireManager(0, constants.DSettingsAppID, constants.DSettingsKeybindingSystemKeysId, "")
+	if err != nil || keybindingSystemConfigPath == "" {
+		logger.Warning(err)
+		return
+	}
+
+	sm.shortcutSystemConfigMgr, err = configManager.NewManager(bus, keybindingSystemConfigPath)
+	if err != nil {
+		logger.Warning(err)
+	}
+
+	keybindingWrapGnomeWmConfigPath, err := ds.AcquireManager(0, constants.DSettingsAppID, constants.DSettingsKeybindingWrapGnomeWmId, "")
+	if err != nil || keybindingWrapGnomeWmConfigPath == "" {
+		logger.Warning(err)
+		return
+	}
+
+	sm.shortcutWrapGnomeWmConfigMgr, err = configManager.NewManager(bus, keybindingWrapGnomeWmConfigPath)
+	if err != nil {
+		logger.Warning(err)
+	}
+
+	keybindingEnableConfigPath, err := ds.AcquireManager(0, constants.DSettingsAppID, constants.DSettingsKeybindingEnableId, "")
+	if err != nil || keybindingEnableConfigPath == "" {
+		logger.Warning(err)
+		return
+	}
+
+	sm.shortcutEnableConfigMgr, err = configManager.NewManager(bus, keybindingEnableConfigPath)
+	if err != nil {
+		logger.Warning(err)
+	}
+
+	keybindingPlatformConfigPath, err := ds.AcquireManager(0, constants.DSettingsAppID, constants.DSettingsKeybindingPlatformId, "")
+	if err != nil || keybindingPlatformConfigPath == "" {
+		logger.Warning(err)
+		return
+	}
+
+	sm.shortcutPlatformMgr, err = configManager.NewManager(bus, keybindingPlatformConfigPath)
+	if err != nil {
+		logger.Warning(err)
+	}
+}
+
+func (sm *ShortcutManager) getSystemConfigCallbacks() (
+	saveCallback func(id string, keystrokes []string) error,
+	loadCallback func(id string) ([]string, error)) {
+
+	saveCallback = func(id string, keystrokes []string) error {
+		if sm.shortcutSystemConfigMgr == nil {
+			return fmt.Errorf("system config manager is nil")
+		}
+		return sm.shortcutSystemConfigMgr.SetValue(0, id, dbus.MakeVariant(keystrokes))
+	}
+
+	loadCallback = func(id string) ([]string, error) {
+		if sm.shortcutSystemConfigMgr == nil {
+			return nil, fmt.Errorf("system config manager is nil")
+		}
+		value, err := sm.shortcutSystemConfigMgr.Value(0, id)
+		if err != nil {
+			return nil, err
+		}
+		keystrokes, err := convertToStringSlice(value.Value())
+		if err != nil {
+			return nil, fmt.Errorf("invalid keystrokes type: %v", err)
+		}
+		return keystrokes, nil
+	}
+
+	return saveCallback, loadCallback
+}
+
+func (sm *ShortcutManager) getMediaConfigCallbacks() (
+	saveCallback func(id string, keystrokes []string) error,
+	loadCallback func(id string) ([]string, error)) {
+
+	saveCallback = func(id string, keystrokes []string) error {
+		if sm.shortcutMediaConfigMgr == nil {
+			return fmt.Errorf("media config manager is nil")
+		}
+		return sm.shortcutMediaConfigMgr.SetValue(0, id, dbus.MakeVariant(keystrokes))
+	}
+
+	loadCallback = func(id string) ([]string, error) {
+		if sm.shortcutMediaConfigMgr == nil {
+			return nil, fmt.Errorf("media config manager is nil")
+		}
+		value, err := sm.shortcutMediaConfigMgr.Value(0, id)
+		if err != nil {
+			return nil, err
+		}
+		keystrokes, err := convertToStringSlice(value.Value())
+		if err != nil {
+			return nil, fmt.Errorf("invalid keystrokes type: %v", err)
+		}
+		return keystrokes, nil
+	}
+
+	return saveCallback, loadCallback
 }
 
 func (sm *ShortcutManager) recordEventLoop() {
@@ -953,31 +1105,56 @@ func strvLower(in []string) []string {
 }
 
 // 检测一个系统快捷键是否配置为可用，true可用，false不可用
-func (sm *ShortcutManager) CheckSystem(gsPlatform, gsEnable *gio.Settings, id string) bool {
-	platformSet := arr2set(gsPlatform.ListKeys())
-	enableSet := arr2set(gsEnable.ListKeys())
+func (sm *ShortcutManager) CheckSystem(id string) bool {
+	platformList, err := sm.shortcutPlatformMgr.KeyList().Get(0)
+	if err != nil {
+		logger.Warning(err)
+		return false
+	}
+	platformSet := arr2set(platformList)
+	enableList, err := sm.shortcutEnableConfigMgr.KeyList().Get(0)
+	if err != nil {
+		logger.Warning(err)
+		return false
+	}
+	enableSet := arr2set(enableList)
 	sysType := strings.ToLower(systemType())
 
 	// 判断是否是支持的平台
 	if platformSet[id] {
-		plats := gsPlatform.GetStrv(id)
-
-		platSet := arr2set(strvLower(plats))
+		plats, err := sm.shortcutPlatformMgr.Value(0, id)
+		if err != nil {
+			logger.Warning(err)
+			return false
+		}
+		platSlice, err := convertToStringSlice(plats.Value())
+		if err != nil {
+			logger.Warning("Failed to convert platform list:", err)
+			return false
+		}
+		platSet := arr2set(strvLower(platSlice))
 		if !platSet["all"] && !platSet[sysType] {
 			return false
 		}
 	}
 
 	// 判断是否配置开启
-	if enableSet[id] && !gsEnable.GetBoolean(id) {
-		logger.Debugf("%s is disabled", id)
-		return false
+	if enableSet[id] {
+		enable, err := sm.shortcutEnableConfigMgr.Value(0, id)
+		if err != nil {
+			logger.Warning(err)
+			return false
+		}
+		if !enable.Value().(bool) {
+			logger.Debugf("%s is disabled", id)
+			return false
+		}
 	}
 
 	return true
 }
 
-func (sm *ShortcutManager) AddSystemById(gsettings *gio.Settings, wmObj wm.Wm, id string) {
+func (sm *ShortcutManager) AddSystemById(wmObj wm.Wm, id string) {
 	shortcut := sm.GetByIdType(id, ShortcutTypeSystem)
 	if shortcut != nil {
 		logger.Debugf("%s is exist", id)
@@ -989,7 +1166,6 @@ func (sm *ShortcutManager) AddSystemById(gsettings *gio.Settings, wmObj wm.Wm, i
 	if name == "" {
 		name = id
 	}
-
 	cmd := getSystemActionCmd(id)
 	if id == "terminal-quake" && strings.Contains(cmd, "deepin-terminal") {
 		termPath, _ := exec.LookPath("deepin-terminal")
@@ -997,11 +1173,20 @@ func (sm *ShortcutManager) AddSystemById(gsettings *gio.Settings, wmObj wm.Wm, i
 			return
 		}
 	}
-
-	keystrokes := gsettings.GetStrv(id)
-	gs := NewGSettingsShortcut(gsettings, wmObj, id, ShortcutTypeSystem, keystrokes, name)
+	keystrokes, err := sm.shortcutSystemConfigMgr.Value(0, id)
+	if err != nil {
+		logger.Warning(err)
+		return
+	}
+	saveCallback, loadCallback := sm.getSystemConfigCallbacks()
+	keystrokesSlice, err := convertToStringSlice(keystrokes.Value())
+	if err != nil {
+		logger.Warning("Failed to convert keystrokes:", err)
+		return
+	}
+	gs := NewShortcut(wmObj, id, ShortcutTypeSystem, keystrokesSlice, name, saveCallback, loadCallback)
 	sysShortcut := &SystemShortcut{
-		GSettingsShortcut: gs,
+		ShortcutObject: gs,
 		arg: &ActionExecCmdArg{
 			Cmd: cmd,
 		},
@@ -1018,14 +1203,20 @@ func (sm *ShortcutManager) DelSystemById(id string) {
 	sm.Delete(shortcut)
 }
 
-func (sm *ShortcutManager) AddSystem(gsettings, gsPlatform, gsEnable *gio.Settings, wmObj wm.Wm) {
+func (sm *ShortcutManager) AddSystem(wmObj wm.Wm) {
 	logger.Debug("AddSystem")
 	allow, err := wmObj.CompositingAllowSwitch().Get(0)
 	if err != nil {
 		logger.Warning(err)
 		allow = false
 	}
-	for _, id := range gsettings.ListKeys() {
+
+	keys, err := sm.shortcutSystemConfigMgr.KeyList().Get(0)
+	if err != nil {
+		logger.Warning(keys)
+	}
+
+	for _, id := range keys {
 		if id == "deepin-screen-recorder" || id == "wm-switcher" {
 			if !allow && id == "wm-switcher" {
 				logger.Debugf("com.deepin.wm.compositingAllowSwitch is false, filter %s", id)
@@ -1038,41 +1229,48 @@ func (sm *ShortcutManager) AddSystem(gsettings, gsPlatform, gsEnable *gio.Settin
 			}
 		}
 
-		if !sm.CheckSystem(gsPlatform, gsEnable, id) {
+		if !sm.CheckSystem(id) {
 			continue
 		}
 
-		sm.AddSystemById(gsettings, wmObj, id)
+		sm.AddSystemById(wmObj, id)
 	}
 }
 
-func (sm *ShortcutManager) AddWM(gsettings *gio.Settings, wmObj wm.Wm) {
-	logger.Debug("AddWM")
-	idNameMap := getWMIdNameMap()
-	releaseType := getDeepinReleaseType()
-	for _, id := range gsettings.ListKeys() {
-		if releaseType == "Server" && strings.Contains(id, "workspace") {
-			logger.Debugf("release type is server filter '%s'", id)
-			continue
-		}
-		if id == "expose-all-windows" || id == "expose-windows" {
-			logger.Debugf("'%s' is abandoned!", id)
-			continue
-		}
-		name := idNameMap[id]
-		if name == "" {
-			name = id
-		}
-		keystrokes := gsettings.GetStrv(id)
-		gs := NewGSettingsShortcut(gsettings, wmObj, id, ShortcutTypeWM, keystrokes, name)
-		sm.addWithoutLock(gs)
-	}
-}
+// TODO delete, because not used
+// func (sm *ShortcutManager) AddWM(gsettings *gio.Settings, wmObj wm.Wm) {
+// 	logger.Debug("AddWM")
+// 	idNameMap := getWMIdNameMap()
+// 	releaseType := getDeepinReleaseType()
+// 	for _, id := range gsettings.ListKeys() {
+// 		if releaseType == "Server" && strings.Contains(id, "workspace") {
+// 			logger.Debugf("release type is server filter '%s'", id)
+// 			continue
+// 		}
+// 		if id == "expose-all-windows" || id == "expose-windows" {
+// 			logger.Debugf("'%s' is abandoned!", id)
+// 			continue
+// 		}
+// 		name := idNameMap[id]
+// 		if name == "" {
+// 			name = id
+// 		}
+// 		keystrokes := gsettings.GetStrv(id)
+// 		gs := NewShortcut(wmObj, id, ShortcutTypeWM, keystrokes, name)
+// 		sm.addWithoutLock(gs)
+// 	}
+// }
 
-func (sm *ShortcutManager) AddMedia(gsettings *gio.Settings, wmObj wm.Wm) {
+func (sm *ShortcutManager) AddMedia(wmObj wm.Wm) {
 	logger.Debug("AddMedia")
 	idNameMap := getMediaIdNameMap()
-	for _, id := range gsettings.ListKeys() {
+
+	keys, err := sm.shortcutMediaConfigMgr.KeyList().Get(0)
+	if err != nil {
+		logger.Warning(err)
+	}
+
+	for _, id := range keys {
 		if id == "media-close" {
 			continue
 		}
@@ -1080,10 +1278,19 @@ func (sm *ShortcutManager) AddMedia(gsettings *gio.Settings, wmObj wm.Wm) {
 		if name == "" {
 			name = id
 		}
-		keystrokes := gsettings.GetStrv(id)
-		gs := NewGSettingsShortcut(gsettings, wmObj, id, ShortcutTypeMedia, keystrokes, name)
+		strokesValue, err := sm.shortcutMediaConfigMgr.Value(0, id)
+		if err != nil {
+			logger.Warning(err)
+		}
+		keystrokes, err := convertToStringSlice(strokesValue.Value())
+		if err != nil {
+			logger.Warning("Failed to convert keystrokes:", err)
+			continue
+		}
+		saveCallback, loadCallback := sm.getMediaConfigCallbacks()
+		gs := NewShortcut(wmObj, id, ShortcutTypeMedia, keystrokes, name, saveCallback, loadCallback)
 		mediaShortcut := &MediaShortcut{
-			GSettingsShortcut: gs,
+			ShortcutObject: gs,
 		}
 		sm.addWithoutLock(mediaShortcut)
 	}
@@ -1260,18 +1467,33 @@ func (sm *ShortcutManager) AddKWinForWayland(wmObj wm.Wm) {
 	}
 }
 
-func (sm *ShortcutManager) AddSystemToKwin(gsettings *gio.Settings, wmObj wm.Wm) {
+func (sm *ShortcutManager) AddSystemToKwin(wmObj wm.Wm) {
 	logger.Debug("AddSystemToKwin")
 	idNameMap := getSystemIdNameMap()
-	for _, id := range gsettings.ListKeys() {
+	keys, err := sm.shortcutSystemConfigMgr.KeyList().Get(0)
+	if err != nil {
+		logger.Warning(keys)
+	}
+
+	for _, id := range keys {
 		name := idNameMap[id]
 		if name == "" {
 			name = id
 		}
 
+		strokesValue, err := sm.shortcutSystemConfigMgr.Value(0, id)
+		if err != nil {
+			logger.Warning(err)
+		}
+
+		keystrokes, err := convertToStringSlice(strokesValue.Value())
+		if err != nil {
+			logger.Warning("Failed to convert keystrokes:", err)
+			continue
+		}
 		accelJson, err := util.MarshalJSON(util.KWinAccel{
 			Id:         id,
-			Keystrokes: gsettings.GetStrv(id),
+			Keystrokes: keystrokes,
 		})
 
 		if id == "screenshot-window" {
@@ -1289,21 +1511,27 @@ func (sm *ShortcutManager) AddSystemToKwin(gsettings *gio.Settings, wmObj wm.Wm)
 		}
 		ok, err := wmObj.SetAccel(0, accelJson)
 		if !ok {
-			logger.Warning("failed to set KWin accels:", id, gsettings.GetStrv(id), err)
+
+			logKeystrokes, _ := convertToStringSlice(strokesValue.Value())
+			logger.Warning("failed to set KWin accels:", id, logKeystrokes, err)
 		}
-		sm.AddSystemById(gsettings, wmObj, id)
+		sm.AddSystemById(wmObj, id)
 	}
 }
 
-func (sm *ShortcutManager) AddMediaToKwin(gsettings *gio.Settings, wmObj wm.Wm) {
+func (sm *ShortcutManager) AddMediaToKwin(wmObj wm.Wm) {
 	logger.Debug("AddMediaToKwin")
 	idNameMap := getMediaIdNameMap()
-	for _, id := range gsettings.ListKeys() {
+	keys, err := sm.shortcutMediaConfigMgr.KeyList().Get(0)
+	if err != nil {
+		logger.Warning(err)
+	}
+
+	for _, id := range keys {
 		if id == "close" {
 			continue
 		}
 		name := idNameMap[id]
-		logger.Warning("+++ gsetting KWin accels ID , NANE:", id, name)
 
 		if name == "" {
 			name = id
@@ -1327,10 +1555,19 @@ func (sm *ShortcutManager) AddMediaToKwin(gsettings *gio.Settings, wmObj wm.Wm) 
 		if !ok {
 			logger.Warning("failed to set KWin accels:", accelJson, err)
 		}
-		keystrokes := gsettings.GetStrv(id)
-		gs := NewGSettingsShortcut(gsettings, wmObj, id, ShortcutTypeMedia, keystrokes, name)
+		strokesValue, err := sm.shortcutMediaConfigMgr.Value(0, id)
+		if err != nil {
+			logger.Warning(err)
+		}
+		keystrokes, err := convertToStringSlice(strokesValue.Value())
+		if err != nil {
+			logger.Warning("Failed to convert keystrokes:", err)
+			continue
+		}
+		saveCallback, loadCallback := sm.getMediaConfigCallbacks()
+		gs := NewShortcut(wmObj, id, ShortcutTypeMedia, keystrokes, name, saveCallback, loadCallback)
 		mediaShortcut := &MediaShortcut{
-			GSettingsShortcut: gs,
+			ShortcutObject: gs,
 		}
 		sm.addWithoutLock(mediaShortcut)
 	}

@@ -21,7 +21,7 @@ const (
 )
 
 type SystemShortcut struct {
-	*GSettingsShortcut
+	*ShortcutObject
 	arg *ActionExecCmdArg
 }
 

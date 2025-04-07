@@ -9,7 +9,7 @@ import (
 )
 
 type MediaShortcut struct {
-	*GSettingsShortcut
+	*ShortcutObject
 }
 
 const (

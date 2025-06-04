@@ -114,6 +114,7 @@ Recommends:
  tlp,
  proxychains4,
  mesa-utils,
+ xserver-xorg-input-synaptics,
 Suggests:
  bluez (>=5.4),
  miraclecast,
@@ -123,7 +124,6 @@ Suggests:
  network-manager-pptp,
  network-manager-sstp,
  network-manager-vpnc,
- xserver-xorg-input-synaptics,
  xserver-xorg-input-wacom,
 Description: daemon handling the DDE session settings
  This package contains the daemon which is responsible for setting the

@@ -397,24 +397,59 @@ func (tpad *Touchpad) disableWhileTyping() {
 		return
 	}
 
-	var usedLibinput bool = false
+	var hasLibinputDevice bool = false
+	var hasNonLibinputDevice bool = false
 	enabled := tpad.DisableIfTyping.Get()
+
+	logger.Infof("[DWT] === Starting disable-while-typing configuration ===")
+	logger.Infof("[DWT] Target state: %v, Total devices: %d", enabled, len(tpad.devInfos))
+
+	// 检测每个设备的DWT支持情况
 	for _, v := range tpad.devInfos {
+		logger.Infof("[DWT] Checking device %d: %s", v.Id, v.Name)
+
+		// 尝试设置来检测是否支持（这是唯一可靠的方法）
 		err := v.EnableDisableWhileTyping(enabled)
 		if err != nil {
-			continue
+			// 设置失败，说明不支持libinput DWT
+			hasNonLibinputDevice = true
+			logger.Infof("[DWT]   - Device does NOT support libinput DWT: %v", err)
+			logger.Infof("[DWT]   - Will use syndaemon for this device")
+		} else {
+			// 设置成功，支持libinput DWT
+			hasLibinputDevice = true
+			logger.Infof("[DWT]   - Successfully configured libinput DWT: %v", enabled)
 		}
-		usedLibinput = true
-	}
-	if usedLibinput {
-		return
 	}
 
-	if enabled {
-		tpad.startSyndaemon()
+	// 根据检测结果决定syndaemon策略
+	logger.Infof("[DWT] Detection results: libinput_devices=%v, syndaemon_devices=%v", hasLibinputDevice, hasNonLibinputDevice)
+
+	if hasNonLibinputDevice {
+		if enabled {
+			logger.Infof("[DWT] Starting syndaemon for non-libinput devices")
+			tpad.startSyndaemon()
+		} else {
+			logger.Infof("[DWT] Stopping syndaemon (DWT disabled)")
+			tpad.stopSyndaemon()
+		}
 	} else {
+		logger.Infof("[DWT] All devices support libinput DWT, ensuring syndaemon is stopped")
 		tpad.stopSyndaemon()
 	}
+
+	// 总结配置结果
+	if !hasLibinputDevice && !hasNonLibinputDevice {
+		logger.Warning("[DWT] No touchpad devices found or none support disable-while-typing functionality")
+	} else if hasLibinputDevice && hasNonLibinputDevice {
+		logger.Infof("[DWT] Mixed environment: using both libinput DWT and syndaemon")
+	} else if hasLibinputDevice {
+		logger.Infof("[DWT] Pure libinput environment: using native DWT only")
+	} else {
+		logger.Infof("[DWT] Legacy environment: using syndaemon only")
+	}
+
+	logger.Infof("[DWT] === Disable-while-typing configuration completed ===")
 }
 
 func (tpad *Touchpad) startSyndaemon() {
@@ -428,6 +463,7 @@ func (tpad *Touchpad) startSyndaemon() {
 		logger.Warning("Failed to start syndaemon, because no cmd is specified")
 		return
 	}
+
 	logger.Debug("[startSyndaemon] will exec:", syncmd)
 	args := strings.Split(syncmd, " ")
 	argsLen := len(args)
@@ -446,6 +482,7 @@ func (tpad *Touchpad) startSyndaemon() {
 		argsLen = len(args)
 		cmd = exec.Command(args[0], args[1:argsLen]...)
 	}
+
 	err := cmd.Start()
 	if err != nil {
 		err = os.Remove(syndaemonPidFile)

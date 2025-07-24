@@ -145,6 +145,7 @@ func (m *Manager) start() {
 
 	m.timesyncd = timesync1.NewTimesync1(m.service.Conn())
 	server, err := getNTPServer()
+	logger.Warning("=======server000=======: %s", server)
 	if err != nil {
 		logger.Warning(err)
 	}
@@ -156,9 +157,11 @@ func (m *Manager) start() {
 	m.systemd = systemd1.NewManager(m.service.Conn())
 	syncFn := func() {
 		ntp, err := m.core.NTP().Get(0)
+		logger.Infof("=======server5551=======:%v", ntp)
 		if err != nil {
 			logger.Warning(err)
 		}
+		logger.Infof("=======server555=======:%v", ntp)
 
 		if ntpServer == "" {
 			if m.isUnitEnable(timesyncdService) && ntp {
@@ -166,12 +169,15 @@ func (m *Manager) start() {
 				if err != nil {
 					logger.Warning(err)
 				}
+				logger.Infof("=======server666=======:%s", serverName)
 				err = m.setNTPServer(serverName)
 				if err != nil {
 					logger.Warning(err)
 				}
 			}
 		} else {
+			// 往配置里面设置ntp服务器，但是这里的server还是空的，server是从原来的配置里面来的，现在配置里面存储的是国家授时的
+			logger.Infof("=======server777=======: %s", ntpServer)
 			err = m.setNTPServer(ntpServer)
 			if err != nil {
 				logger.Warning(err)
@@ -187,15 +193,19 @@ func (m *Manager) start() {
 		}
 	}
 	// 第一次启动时,默认无NTPServer文件.如果时间同步状态是开启的(系统默认开启),将时间同步服务数据同步到timedated中
+	// 从
 	if server == "" {
+		logger.Infof("=======server444=======: %s", server)
 		syncFn()
 	} else {
 		if server != ntpServer {
 			if server != obsoleteNTPServer && obsoleteNTPServer != "-" {
+				logger.Infof("=======server5552=======: %s", server)
 				m.setNTPServer(server)
 				// 文件里已经有值，同步到 dconf 中
 				m.setDsgNTPServer(server)
 			} else {
+				logger.Infof("=======server5553=======: %s", server)
 				// 使用 dconf 配置
 				syncFn()
 			}
@@ -208,6 +218,7 @@ func (m *Manager) start() {
 		// 将obsolete ntp server 标记为已经使用过
 		m.setDsgObsoleteNTPServer("-")
 	}
+
 	m.timesyncd.InitSignalExt(m.signalLoop, true)
 	err = m.timesyncd.ServerName().ConnectChanged(func(hasValue bool, value string) {
 		if !hasValue {
@@ -243,6 +254,7 @@ func (m *Manager) start() {
 				return
 			}
 			server, err = m.timesyncd.ServerName().Get(dbus.FlagNoAutoStart)
+			logger.Infof("=======server111=======: %s %v", server, ntp)
 			if err != nil {
 				logger.Warning(err)
 				return
@@ -274,6 +286,7 @@ func (m *Manager) setNTPServer(value string) error {
 
 	m.setNTPServerMu.Lock()
 	defer m.setNTPServerMu.Unlock()
+	logger.Infof("=======server222=======: %s", value)
 	err := m.setNTPServerToTimeSyncd(value)
 	if err != nil {
 		return err
@@ -339,6 +352,8 @@ func (m *Manager) setNTPServerToTimeSyncd(server string) error {
 	if err != nil {
 		logger.Warning(err)
 	}
+
+	logger.Infof("=======server333=======: %s %s", server, m.fallbackNTPServer)
 
 	if setFallback && m.fallbackNTPServer != "" {
 		// 配置支持FallbackNtp字段，经过验证无法达到要求，故采用这种方式
